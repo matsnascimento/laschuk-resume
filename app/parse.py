@@ -1,0 +1,212 @@
+"""Pure parsing/filtering of Evolution API v2 webhook payloads (no I/O)."""
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Any, Iterable
+
+UPSERT_EVENTS = {"messages.upsert", "messages_upsert"}
+
+# Wrappers WhatsApp uses around the real message content.
+_WRAPPERS = (
+    "ephemeralMessage",
+    "viewOnceMessage",
+    "viewOnceMessageV2",
+    "viewOnceMessageV2Extension",
+    "documentWithCaptionMessage",
+)
+
+
+@dataclass(frozen=True)
+class AudioMessage:
+    message_id: str
+    remote_jid: str
+    participant: str
+    push_name: str
+    key: dict[str, Any]
+    message: dict[str, Any]
+    mimetype: str
+    seconds: int
+    ptt: bool
+    timestamp: int
+    inline_base64: str  # filled when Evolution has WEBHOOK_BASE64 enabled
+
+
+@dataclass(frozen=True)
+class Decision:
+    """Outcome of filtering a single message: `audio` is set only when accepted."""
+
+    accepted: bool
+    reason: str
+    message_id: str = ""
+    audio: AudioMessage | None = None
+
+
+def normalize_event(name: Any) -> str:
+    return str(name or "").strip().lower().replace("-", ".").replace("_", ".")
+
+
+def is_upsert_event(payload: dict[str, Any]) -> bool:
+    return normalize_event(payload.get("event")) in {normalize_event(e) for e in UPSERT_EVENTS}
+
+
+def iter_messages(payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    """Evolution sends `data` as one message object; some setups send a list or {messages: [...]}."""
+    data = payload.get("data")
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict) and isinstance(data.get("messages"), list):
+        items = data["messages"]
+    elif isinstance(data, dict):
+        items = [data]
+    else:
+        items = []
+    return (m for m in items if isinstance(m, dict))
+
+
+def unwrap_message(message: dict[str, Any] | None) -> dict[str, Any]:
+    msg = message or {}
+    for _ in range(5):  # wrappers can nest; bound the loop
+        for wrapper in _WRAPPERS:
+            inner = msg.get(wrapper)
+            if isinstance(inner, dict) and isinstance(inner.get("message"), dict):
+                msg = inner["message"]
+                break
+        else:
+            return msg
+    return msg
+
+
+def _int(value: Any, default: int = 0) -> int:
+    # Baileys sometimes serialises longs as {"low": n, "high": 0, "unsigned": bool}
+    if isinstance(value, dict) and "low" in value:
+        value = value.get("low")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def evaluate_message(
+    item: dict[str, Any],
+    group_jid: str,
+    *,
+    now: float | None = None,
+    max_age_seconds: int = 0,
+) -> Decision:
+    key = item.get("key") or {}
+    message_id = str(key.get("id") or "")
+    if not message_id:
+        return Decision(False, "no message id")
+    # fromMe allowed: the bot runs on the owner's own WhatsApp; it only replies with text, so no loop.
+
+    remote_jid = str(key.get("remoteJid") or "")
+    if not remote_jid.endswith("@g.us"):
+        return Decision(False, "not a group message", message_id)
+    if not group_jid or remote_jid not in {j.strip() for j in group_jid.split(",") if j.strip()}:
+        return Decision(False, "other group", message_id)
+
+    raw_message = item.get("message") or {}
+    content = unwrap_message(raw_message)
+    audio = content.get("audioMessage")
+    if not isinstance(audio, dict):
+        return Decision(False, f"not audio ({item.get('messageType') or 'unknown'})", message_id)
+
+    timestamp = _int(item.get("messageTimestamp"))
+    if max_age_seconds and timestamp:
+        age = (now if now is not None else time.time()) - timestamp
+        if age > max_age_seconds:
+            return Decision(False, f"too old ({int(age)}s)", message_id)
+
+    inline = raw_message.get("base64") or content.get("base64") or ""
+    return Decision(
+        True,
+        "audio",
+        message_id,
+        AudioMessage(
+            message_id=message_id,
+            remote_jid=remote_jid,
+            participant=str(key.get("participant") or item.get("participant") or ""),
+            push_name=str(item.get("pushName") or ""),
+            key={k: key[k] for k in ("id", "remoteJid", "fromMe", "participant") if k in key},
+            message=raw_message,
+            mimetype=str(audio.get("mimetype") or "audio/ogg"),
+            seconds=_int(audio.get("seconds")),
+            ptt=bool(audio.get("ptt")),
+            timestamp=timestamp,
+            inline_base64=inline if isinstance(inline, str) else "",
+        ),
+    )
+
+
+def evaluate_payload(
+    payload: dict[str, Any],
+    group_jid: str,
+    *,
+    now: float | None = None,
+    max_age_seconds: int = 0,
+) -> list[Decision]:
+    if not isinstance(payload, dict) or not is_upsert_event(payload):
+        return []
+    return [
+        evaluate_message(m, group_jid, now=now, max_age_seconds=max_age_seconds)
+        for m in iter_messages(payload)
+    ]
+
+
+def find_group_jid(groups: Any, name: str) -> str:
+    """Pick the JID of the group whose subject equals `name` (case/space-insensitive).
+
+    Raises LookupError when zero or several groups match, so the operator sets GROUP_JID.
+    """
+    if isinstance(groups, dict):
+        groups = groups.get("groups") or groups.get("data") or []
+    wanted = " ".join(name.split()).casefold()
+    matches = sorted(
+        {
+            str(g.get("id"))
+            for g in groups or []
+            if isinstance(g, dict)
+            and g.get("id")
+            and " ".join(str(g.get("subject") or "").split()).casefold() == wanted
+        }
+    )
+    if not matches:
+        raise LookupError(f"no WhatsApp group named {name!r} visible to this instance")
+    if len(matches) > 1:
+        raise LookupError(f"several groups named {name!r}: {', '.join(matches)}; set GROUP_JID")
+    return matches[0]
+
+
+def mime_extension(mimetype: str) -> str:
+    base = mimetype.split(";")[0].strip().lower()
+    return {
+        "audio/ogg": "ogg",
+        "audio/opus": "ogg",
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/mp4": "m4a",
+        "audio/m4a": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/aac": "m4a",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/webm": "webm",
+        "audio/amr": "amr",
+    }.get(base, "ogg")
+
+
+def clean_summary(text: str, max_lines: int = 4, max_chars: int = 600) -> str:
+    """Normalise LLM output into at most `max_lines` non-empty short lines."""
+    lines = []
+    for raw in (text or "").replace("\r", "").split("\n"):
+        line = raw.strip().strip("`").strip()
+        if not line:
+            continue
+        if line.lower().startswith(("resumo:", "**resumo")) and len(line) < 20:
+            continue
+        lines.append(line)
+    out = "\n".join(lines[:max_lines])
+    if len(out) > max_chars:
+        out = out[: max_chars - 1].rstrip() + "…"
+    return out
