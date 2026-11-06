@@ -1,0 +1,39 @@
+{
+  "event": "messages.upsert",
+  "instance": "test-instance",
+  "data": {
+    "key": {
+      "remoteJid": "120363000000000001@g.us",
+      "fromMe": false,
+      "id": "3EB0A1B2C3D4E5F6A7B8",
+      "participant": "5511999990000@s.whatsapp.net"
+    },
+    "pushName": "Maria",
+    "status": "DELIVERY_ACK",
+    "message": {
+      "audioMessage": {
+        "url": "https://mmg.whatsapp.net/v/t62.7117-24/example.enc",
+        "mimetype": "audio/ogg; codecs=opus",
+        "fileSha256": "AAAA",
+        "fileLength": "18234",
+        "seconds": 14,
+        "ptt": true,
+        "mediaKey": "BBBB",
+        "fileEncSha256": "CCCC",
+        "directPath": "/v/t62.7117-24/example.enc",
+        "mediaKeyTimestamp": "1730900000"
+      },
+      "messageContextInfo": {}
+    },
+    "contextInfo": null,
+    "messageType": "audioMessage",
+    "messageTimestamp": 1730900000,
+    "instanceId": "00000000-0000-0000-0000-000000000000",
+    "source": "android"
+  },
+  "destination": "http://localhost:8080/webhook",
+  "date_time": "2026-11-06T12:00:00.000Z",
+  "sender": "5511888880000@s.whatsapp.net",
+  "server_url": "https://evolution.example.invalid",
+  "apikey": "redacted"
+}
