@@ -1,0 +1,23 @@
+services:
+  laschuk-resume:
+    build:
+      context: .
+      args:
+        # 1 = also install faster-whisper (local transcription fallback)
+        LOCAL_WHISPER: "${LOCAL_WHISPER:-0}"
+    container_name: laschuk-resume
+    env_file: .env
+    environment:
+      LOG_FILE: /app/logs/laschuk-resume.log
+      DEDUPE_DB: /app/data/seen.sqlite3
+    ports:
+      - "${PORT:-8787}:${PORT:-8787}"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request;urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"PORT\",\"8787\")}/health',timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
