@@ -1,0 +1,2 @@
+# Optional: local transcription fallback (no OPENAI_API_KEY needed). Large download on first use.
+faster-whisper>=1.0
